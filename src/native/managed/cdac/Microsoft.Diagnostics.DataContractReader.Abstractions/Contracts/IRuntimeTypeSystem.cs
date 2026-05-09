@@ -197,6 +197,10 @@ public interface IRuntimeTypeSystem : IContract
     // This corresponds to native MethodDesc::RequiresInstArg().
     bool RequiresInstArg(MethodDescHandle methodDesc) => throw new NotImplementedException();
 
+    // Return true if the method is shared by multiple generic instantiations (i.e. a "canonical" shared method).
+    // This corresponds to native MethodDesc::IsSharedByGenericInstantiations().
+    bool IsSharedByGenericInstantiations(MethodDescHandle methodDesc) => throw new NotImplementedException();
+
     // Return true if the method uses the async calling convention (CORINFO_CALLCONV_ASYNCCALL).
     // This corresponds to native MethodDesc::IsAsyncMethod().
     bool IsAsyncMethod(MethodDescHandle methodDesc) => throw new NotImplementedException();
