@@ -5,6 +5,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 using Microsoft.Diagnostics.DataContractReader.Contracts;
@@ -1722,8 +1724,180 @@ public sealed unsafe partial class DacDbiImpl : IDacDbiInterface
         return hr;
     }
 
-    public int GetObjectFields(nint id, uint celt, COR_FIELD* layout, uint* pceltFetched)
-        => LegacyFallbackHelper.CanFallback() && _legacy is not null ? _legacy.GetObjectFields(id, celt, layout, pceltFetched) : HResults.E_NOTIMPL;
+    public int GetObjectFields(ulong id, uint celt, COR_FIELD* layout, uint* pceltFetched)
+    {
+        if (pceltFetched == null)
+            return HResults.E_POINTER;
+
+        if (id == 0)
+            return CorDbgHResults.CORDBG_E_CLASS_NOT_LOADED;
+
+        int hr = HResults.S_OK;
+        try
+        {
+            // Reject TypeDescs - matches native DAC behavior. The low bits of an MT pointer are
+            // always zero; any non-zero low bits indicate a TypeDesc encoding.
+            if ((id & ((ulong)_target.PointerSize - 1)) != 0)
+                throw Marshal.GetExceptionForHR(HResults.E_INVALIDARG)!;
+
+            IRuntimeTypeSystem rts = _target.Contracts.RuntimeTypeSystem;
+            TypeHandle typeHandle = rts.GetTypeHandle(new TargetPointer(id));
+
+            // UpCastTypeIfNeeded equivalent: continuation subtype MTs have no metadata of their
+            // own, so fall back to the parent continuation MT for field iteration.
+            if (rts.IsContinuation(typeHandle))
+            {
+                TargetPointer continuationMT = rts.GetParentMethodTable(typeHandle);
+                if (continuationMT != TargetPointer.Null)
+                    typeHandle = rts.GetTypeHandle(continuationMT);
+            }
+
+            // Number of introduced instance fields = NumInstanceFields - parent's NumInstanceFields.
+            // This mirrors ApproxFieldDescIterator(INSTANCE_FIELDS) which iterates the
+            // [0 .. GetNumIntroducedInstanceFields) prefix of the FieldDescList.
+            uint cFields = rts.GetNumInstanceFields(typeHandle);
+            TargetPointer parentMT = rts.GetParentMethodTable(typeHandle);
+            if (parentMT != TargetPointer.Null)
+            {
+                TypeHandle parentHandle = rts.GetTypeHandle(parentMT);
+                cFields -= rts.GetNumInstanceFields(parentHandle);
+            }
+
+            // Caller may pass a null layout buffer to query the number of fields.
+            if (layout == null)
+            {
+                *pceltFetched = cFields;
+                hr = HResults.S_FALSE;
+            }
+            else
+            {
+                if (celt < cFields)
+                {
+                    cFields = celt;
+                    // returning fewer than the total
+                    hr = HResults.S_FALSE;
+                }
+
+                // Match native DAC: pceltFetched is set to celt (the input capacity), not the
+                // count actually written. Preserve this behavior for compatibility.
+                *pceltFetched = celt;
+
+                bool isReferenceType = rts.IsObjRef(typeHandle);
+                uint firstFieldOffset = isReferenceType ? (uint)_target.PointerSize : 0u;
+
+                TargetPointer fieldDescList = rts.GetFieldDescList(typeHandle);
+                uint fieldDescSize = _target.GetTypeInfo(DataType.FieldDesc).Size!.Value;
+
+                Contracts.IEcmaMetadata ecmaMetadataContract = _target.Contracts.EcmaMetadata;
+                Contracts.ISignatureDecoder signatureDecoder = _target.Contracts.SignatureDecoder;
+
+                for (uint i = 0; i < cFields; ++i)
+                {
+                    TargetPointer fieldDescPtr = fieldDescList + i * fieldDescSize;
+                    COR_FIELD* corField = layout + i;
+
+                    uint memberDef = rts.GetFieldDescMemberDef(fieldDescPtr);
+                    corField->token = memberDef;
+
+                    // Resolve metadata for this field's enclosing class (for offset lookup and
+                    // signature decoding context).
+                    TargetPointer enclosingMT = rts.GetMTOfEnclosingClass(fieldDescPtr);
+                    TypeHandle enclosingTypeHandle = rts.GetTypeHandle(enclosingMT);
+                    TargetPointer enclosingModulePtr = rts.GetModule(enclosingTypeHandle);
+                    Contracts.ModuleHandle enclosingModuleHandle = _target.Contracts.Loader.GetModuleHandleFromModulePtr(enclosingModulePtr);
+                    MetadataReader enclosingMdReader = ecmaMetadataContract.GetMetadata(enclosingModuleHandle)!;
+                    FieldDefinitionHandle fieldDefHandle = (FieldDefinitionHandle)MetadataTokens.Handle((int)memberDef);
+                    FieldDefinition fieldDef = enclosingMdReader.GetFieldDefinition(fieldDefHandle);
+
+                    corField->offset = rts.GetFieldDescOffset(fieldDescPtr, fieldDef) + firstFieldOffset;
+
+                    // Resolve the field's type. If we cannot decode the signature (e.g. corrupt
+                    // metadata or a type that cannot be loaded), zero out the type id and
+                    // fieldType, matching native DAC behavior when LookupFieldTypeHandle returns
+                    // a null TypeHandle.
+                    try
+                    {
+                        TypeHandle fieldTypeHandle = signatureDecoder.DecodeFieldSignature(fieldDef.Signature, enclosingModuleHandle, enclosingTypeHandle);
+
+                        CorElementType signatureType = rts.GetSignatureCorElementType(fieldTypeHandle);
+                        if (signatureType == CorElementType.Byref)
+                        {
+                            corField->fieldType = (int)CorElementType.Byref;
+                            // All ByRefs intentionally return IntPtr's MethodTable.
+                            corField->id.token1 = rts.GetPrimitiveType(CorElementType.I).Address.Value;
+                            corField->id.token2 = 0;
+                        }
+                        else
+                        {
+                            // Resolve the field type to a MethodTable, mirroring
+                            // TypeHandle::GetMethodTable in the native DAC:
+                            //   - Pointer/FnPtr typedescs report IntPtr's MethodTable.
+                            //   - All other forms (primitives, classes, value types, arrays,
+                            //     generic instances) are MethodTables in the cDAC representation.
+                            TypeHandle mtHandle = (signatureType == CorElementType.Ptr || signatureType == CorElementType.FnPtr)
+                                ? rts.GetPrimitiveType(CorElementType.U)
+                                : fieldTypeHandle;
+
+                            // Native DAC reads GetInternalCorElementType from the MethodTable,
+                            // which for pointer types yields ELEMENT_TYPE_U (IntPtr's primitive).
+                            corField->fieldType = (int)rts.GetInternalCorElementType(mtHandle);
+                            corField->id.token1 = mtHandle.Address.Value;
+                            corField->id.token2 = 0;
+                        }
+                    }
+                    catch (System.Exception)
+                    {
+                        // Field type could not be resolved - mirror native's null-TypeHandle path.
+                        corField->id = default;
+                        corField->fieldType = 0;
+                    }
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            hr = ex.HResult;
+        }
+
+#if DEBUG
+        if (_legacy is not null)
+        {
+            uint fetchedLocal = 0;
+            if (layout == null)
+            {
+                int hrLocal = _legacy.GetObjectFields(id, celt, null, &fetchedLocal);
+                Debug.ValidateHResult(hr, hrLocal);
+                if (hr == HResults.S_FALSE && hrLocal == HResults.S_FALSE)
+                {
+                    Debug.Assert(*pceltFetched == fetchedLocal, $"cDAC: {*pceltFetched}, DAC: {fetchedLocal}");
+                }
+            }
+            else
+            {
+                COR_FIELD[] localFields = new COR_FIELD[celt == 0 ? 1 : celt];
+                fixed (COR_FIELD* localFieldsPtr = localFields)
+                {
+                    int hrLocal = _legacy.GetObjectFields(id, celt, localFieldsPtr, &fetchedLocal);
+                    Debug.ValidateHResult(hr, hrLocal);
+                    if (hr >= HResults.S_OK && hrLocal >= HResults.S_OK)
+                    {
+                        Debug.Assert(*pceltFetched == fetchedLocal, $"cDAC: {*pceltFetched}, DAC: {fetchedLocal}");
+                        for (uint i = 0; i < celt; ++i)
+                        {
+                            Debug.Assert(layout[i].token == localFieldsPtr[i].token, $"field[{i}].token cDAC: {layout[i].token:x}, DAC: {localFieldsPtr[i].token:x}");
+                            Debug.Assert(layout[i].offset == localFieldsPtr[i].offset, $"field[{i}].offset cDAC: {layout[i].offset}, DAC: {localFieldsPtr[i].offset}");
+                            Debug.Assert(layout[i].fieldType == localFieldsPtr[i].fieldType, $"field[{i}].fieldType cDAC: {layout[i].fieldType}, DAC: {localFieldsPtr[i].fieldType}");
+                            Debug.Assert(layout[i].id.token1 == localFieldsPtr[i].id.token1, $"field[{i}].id.token1 cDAC: {layout[i].id.token1:x}, DAC: {localFieldsPtr[i].id.token1:x}");
+                            Debug.Assert(layout[i].id.token2 == localFieldsPtr[i].id.token2, $"field[{i}].id.token2 cDAC: {layout[i].id.token2:x}, DAC: {localFieldsPtr[i].id.token2:x}");
+                        }
+                    }
+                }
+            }
+        }
+#endif
+
+        return hr;
+    }
 
     public int GetTypeLayout(ulong id, COR_TYPE_LAYOUT* pLayout)
     {
