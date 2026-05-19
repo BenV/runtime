@@ -3460,6 +3460,10 @@ private:
 
     PER_HEAP_ISOLATED_METHOD BOOL dt_high_memory_load_p();
 
+#ifdef TARGET_UNIX
+    PER_HEAP_ISOLATED_METHOD bool ReadTHPEnabled();
+#endif // TARGET_UNIX
+
     PER_HEAP_ISOLATED_METHOD bool compute_hard_limit();
 
     PER_HEAP_ISOLATED_METHOD bool compute_memory_settings(bool is_initialization, uint32_t& nhp, uint32_t nhp_from_config, size_t& seg_size_from_config,
@@ -5347,6 +5351,9 @@ private:
 
     // Indicate to use large pages. This only works if hardlimit is also enabled.
     PER_HEAP_ISOLATED_FIELD_INIT_ONLY bool use_large_pages_p;
+#ifdef TARGET_UNIX
+    PER_HEAP_ISOLATED_FIELD_INIT_ONLY bool use_thp_p;
+#endif //TARGET_UNIX
 
 #ifdef MULTIPLE_HEAPS
     // Init-ed in gc_heap::initialize_gc

@@ -2888,6 +2888,9 @@ size_t gc_heap::eph_gen_starts_size = 0;
 heap_segment* gc_heap::segment_standby_list;
 #endif //USE_REGIONS
 bool          gc_heap::use_large_pages_p = 0;
+#ifdef TARGET_UNIX
+bool          gc_heap::use_thp_p = 0;
+#endif //TARGET_UNIX
 #ifdef HEAP_BALANCE_INSTRUMENTATION
 size_t        gc_heap::last_gc_end_time_us = 0;
 #endif //HEAP_BALANCE_INSTRUMENTATION
@@ -5667,6 +5670,16 @@ BOOL gc_heap::reserve_initial_memory (size_t normal_size, size_t large_size, siz
     {
         for (int heap_no = 0; (reserve_success && (heap_no < num_heaps)); heap_no++)
         {
+#ifdef TARGET_UNIX
+            if (gc_heap::use_thp_p)
+            {
+                if (!GCToOSInterface::VirtualCommitThp(memory_details.initial_pinned_heap[heap_no].memory_base, pinned_size))
+                {
+                    reserve_success = FALSE;
+                }
+            }
+            else 
+#endif // TARGET_UNIX
             if (!GCToOSInterface::VirtualCommit(memory_details.initial_pinned_heap[heap_no].memory_base, pinned_size))
             {
                 reserve_success = FALSE;
@@ -7413,19 +7426,24 @@ void gc_heap::gc_thread_function ()
 
 bool gc_heap::virtual_alloc_commit_for_heap (void* addr, size_t size, int h_number)
 {
+    uint16_t numa_node = NUMA_NODE_UNDEFINED;
 #ifdef MULTIPLE_HEAPS
     if (GCToOSInterface::CanEnableGCNumaAware())
     {
-        uint16_t numa_node = heap_select::find_numa_node_from_heap_no(h_number);
-        if (GCToOSInterface::VirtualCommit (addr, size, numa_node))
-            return true;
+        numa_node = heap_select::find_numa_node_from_heap_no(h_number);
     }
 #else //MULTIPLE_HEAPS
     UNREFERENCED_PARAMETER(h_number);
 #endif //MULTIPLE_HEAPS
 
-    //numa aware not enabled, or call failed --> fallback to VirtualCommit()
-    return GCToOSInterface::VirtualCommit(addr, size);
+    #ifdef TARGET_UNIX
+    if (use_thp_p)
+    {
+        return GCToOSInterface::VirtualCommitThp(addr, size, numa_node);
+    }
+#endif //TARGET_UNIX
+
+    return GCToOSInterface::VirtualCommit(addr, size, numa_node);
 }
 
 bool gc_heap::virtual_commit (void* address, size_t size, int bucket, int h_number, bool* hard_limit_exceeded_p)
@@ -7512,9 +7530,26 @@ bool gc_heap::virtual_commit (void* address, size_t size, int bucket, int h_numb
 
     // If it's a valid heap number it means it's commiting for memory on the GC heap.
     // In addition if large pages is enabled, we set commit_succeeded_p to true because memory is already committed.
-    bool commit_succeeded_p = ((h_number >= 0) ? (use_large_pages_p ? true :
-                              virtual_alloc_commit_for_heap (address, size, h_number)) :
-                              GCToOSInterface::VirtualCommit(address, size));
+    bool commit_succeeded_p = false;
+    if (h_number >= 0)
+    {
+        // Heap memory commit
+        commit_succeeded_p = use_large_pages_p ? true : virtual_alloc_commit_for_heap (address, size, h_number);
+    }
+    else
+    {
+        // Bookkeeping memory commit (h_number < 0)
+#ifdef TARGET_UNIX
+        if (use_thp_p)
+        {
+            commit_succeeded_p = GCToOSInterface::VirtualCommitThp(address, size, NUMA_NODE_UNDEFINED);
+        }
+        else
+#endif //TARGET_UNIX
+        {
+            commit_succeeded_p = GCToOSInterface::VirtualCommit(address, size);
+        }
+    }
 
     if (!commit_succeeded_p && should_count)
     {
@@ -49225,6 +49260,10 @@ HRESULT GCHeap::Initialize()
         return CLR_E_GC_BAD_HARD_LIMIT;
     }
 
+#ifdef TARGET_UNIX
+    // GCTHP will be turned off when users choose to use GCLargePages - explicit huge pages.
+    gc_heap::use_thp_p = GCConfig::GetGCTHP() && gc_heap::ReadTHPEnabled() && !GCConfig::GetGCLargePages();
+#endif //TARGET_UNIX
     uint32_t nhp = 1;
     uint32_t nhp_from_config = 0;
     uint32_t max_nhp_from_config = (uint32_t)GCConfig::GetMaxHeapCount();
@@ -53268,6 +53307,9 @@ void GCHeap::DiagGetGCSettings(EtwGCSettingsInfo* etw_settings)
     etw_settings->concurrent_gc_p = false;
 #endif //BACKGROUND_GC
     etw_settings->use_large_pages_p = gc_heap::use_large_pages_p;
+#ifdef TARGET_UNIX
+    etw_settings->use_thp_p = gc_heap::use_thp_p;
+#endif // TARGET_UNIX
     etw_settings->use_frozen_segments_p = gc_heap::use_frozen_segments_p;
     etw_settings->hard_limit_config_p = gc_heap::hard_limit_config_p;
     etw_settings->no_affinitize_p =
@@ -53678,6 +53720,39 @@ int GCHeap::RefreshMemoryLimit()
 {
     return gc_heap::refresh_memory_limit();
 }
+
+#ifdef TARGET_UNIX
+bool gc_heap::ReadTHPEnabled()
+{
+    const char* thp_enabled_path = "/sys/kernel/mm/transparent_hugepage/enabled";
+    FILE* file = fopen(thp_enabled_path, "r");
+
+    if (file == nullptr)
+        return false;
+
+    char* line = nullptr;
+    size_t lineLen = 0;
+    bool is_enabled = false;
+
+    if (getline(&line, &lineLen, file) != -1)
+    {
+        if (strstr(line, "[madvise]") != nullptr)
+        {
+            is_enabled = true;
+            dprintf(1, "GC: Transparent huge pages are enabled with madvise.\n");
+        }
+        else
+        {
+            dprintf(1, "GC: THP is not enabled with madvise, please run 'echo madvise > /sys/kernel/mm/transparent_hugepage/enabled' as root to enable it.\n");
+        }
+    }
+
+    free(line);  // getline allocates memory
+    fclose(file);
+    return is_enabled;
+}
+#endif // TARGET_UNIX
+
 
 bool gc_heap::compute_hard_limit()
 {
