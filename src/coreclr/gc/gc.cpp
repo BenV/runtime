@@ -2040,7 +2040,7 @@ const int max_snoop_level = 128;
 #endif //CARD_BUNDLE
 
 // min size to decommit to make the OS call worthwhile
-#define MIN_DECOMMIT_SIZE  (4*OS_LARGE_PAGE_SIZE)
+#define MIN_DECOMMIT_SIZE  (OS_LARGE_PAGE_SIZE)
 
 // max size to decommit per millisecond
 #define DECOMMIT_SIZE_PER_MILLISECOND (160*1024)
