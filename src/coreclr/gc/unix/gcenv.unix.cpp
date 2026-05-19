@@ -734,7 +734,7 @@ void* GCToOSInterface::VirtualReserveAndCommitLargePages(size_t size, uint16_t n
     uint32_t largePagesFlag = 0;
 #endif
 
-    void* pRetVal = VirtualReserveInner(size, OS_PAGE_SIZE, 0, largePagesFlag, true);
+    void* pRetVal = VirtualReserveInner(size, OS_LARGE_PAGE_SIZE, 0, largePagesFlag, true);
     if (VirtualCommitInner(pRetVal, size, node, /* newMemory */ true))
     {
         return pRetVal;

@@ -93,7 +93,7 @@ BOOL bgc_heap_walk_for_etw_p = FALSE;
 #endif //BACKGROUND_GC && FEATURE_EVENT_TRACE
 
 #define MAX_PTR ((uint8_t*)(~(ptrdiff_t)0))
-#define commit_min_th (16*OS_PAGE_SIZE)
+#define commit_min_th (OS_LARGE_PAGE_SIZE)
 
 #define MIN_SOH_CROSS_GEN_REFS (400)
 #define MIN_LOH_CROSS_GEN_REFS (800)
