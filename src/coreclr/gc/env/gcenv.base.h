@@ -8,8 +8,6 @@
 
 #include <minipal/utils.h>
 
-#define OS_LARGE_PAGE_SIZE (2097152)
-
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif // _MSC_VER

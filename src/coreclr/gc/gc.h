@@ -102,6 +102,7 @@ class Object;
 class IGCHeapInternal;
 
 /* misc defines */
+#define OS_LARGE_PAGE_SIZE (2097152)
 #define LARGE_OBJECT_SIZE ((size_t)(85000))
 
 enum gc_generation_num
