@@ -9,6 +9,7 @@
 #include <minipal/mutex.h>
 
 #define NUMA_NODE_UNDEFINED UINT16_MAX
+#define OS_LARGE_PAGE_SIZE (2097152)
 
 bool ParseIndexOrRange(const char** config_string, size_t* start_index, size_t* end_index);
 

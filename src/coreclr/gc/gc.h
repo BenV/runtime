@@ -102,7 +102,6 @@ class Object;
 class IGCHeapInternal;
 
 /* misc defines */
-#define OS_LARGE_PAGE_SIZE (2097152)
 #define LARGE_OBJECT_SIZE ((size_t)(85000))
 
 enum gc_generation_num
@@ -242,11 +241,11 @@ struct alloc_context : gc_alloc_context
     }
 
     // How the alloc_count field is organized -
-    // 
+    //
     // high 16-bits are for the handle info, out of which
-    // high 10 bits store the cpu index. 
+    // high 10 bits store the cpu index.
     // low 6 bits store the number of handles allocated so far (before the next reset).
-    // 
+    //
     // low 16-bits are for the actual alloc_count used by balance_heaps
     inline void init_alloc_count()
     {
