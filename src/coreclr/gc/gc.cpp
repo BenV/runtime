@@ -2040,7 +2040,7 @@ const int max_snoop_level = 128;
 #endif //CARD_BUNDLE
 
 // min size to decommit to make the OS call worthwhile
-#define MIN_DECOMMIT_SIZE  (OS_LARGE_PAGE_SIZE)
+#define MIN_DECOMMIT_SIZE  (OS_LARGE_PAGE_SIZE * 16)
 
 // max size to decommit per millisecond
 #define DECOMMIT_SIZE_PER_MILLISECOND (160*1024)
@@ -5678,7 +5678,7 @@ BOOL gc_heap::reserve_initial_memory (size_t normal_size, size_t large_size, siz
                     reserve_success = FALSE;
                 }
             }
-            else 
+            else
 #endif // TARGET_UNIX
             if (!GCToOSInterface::VirtualCommit(memory_details.initial_pinned_heap[heap_no].memory_base, pinned_size))
             {
