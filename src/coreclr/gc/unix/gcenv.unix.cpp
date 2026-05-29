@@ -752,6 +752,7 @@ void* GCToOSInterface::VirtualReserveAndCommitLargePages(size_t size, uint16_t n
 //  true if it has succeeded, false if it has failed
 bool GCToOSInterface::VirtualDecommit(void* address, size_t size)
 {
+    return true;
     // TODO: This can fail, however the GC does not handle the failure gracefully
     // Explicitly calling mmap instead of mprotect here makes it
     // that much more clear to the operating system that we no
@@ -784,6 +785,7 @@ bool GCToOSInterface::VirtualDecommit(void* address, size_t size)
 //  true if it has succeeded, false if it has failed
 bool GCToOSInterface::VirtualReset(void * address, size_t size, bool unlock)
 {
+    return true;
     int st = EINVAL;
 
 #if defined(MADV_DONTDUMP) || defined(HAVE_MADV_FREE)
